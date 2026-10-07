@@ -73,6 +73,16 @@ module_param(mgmt_discovery_timeout, uint, 0);
 static uint ops_discovery_timeout = 100;
 module_param(ops_discovery_timeout, uint, 0);
 
+/*
+ * On hosts that grant only one MSI vector, switch to MSI-X after the device
+ * has finished its MSI handshake. The firmware latches the interrupt type
+ * and vector count at its first notification; with 1 MSI vector every Master
+ * Minion notification fails and is reported as an error event.
+ */
+static bool msix = true;
+module_param(msix, bool, 0444);
+MODULE_PARM_DESC(msix, "Switch from 1 MSI vector to 4 MSI-X vectors after the SP boot handshake (default: true)");
+
 /* Device bitmap representing initialized device nodes */
 DECLARE_BITMAP(dev_bitmap, ET_MAX_DEVS) = { 0 };
 
@@ -2559,6 +2569,76 @@ static void destroy_et_pci_dev(struct et_pci_dev *et_dev)
 }
 
 /**
+ * et_switch_to_msix() - Replace the single MSI vector by 4 MSI-X vectors
+ * @et_dev: Pointer to struct et_pci_dev, holding exactly 1 MSI vector
+ *
+ * The SP boot blocks until the host enables MSI and sets the mgmt DIR status
+ * to ATU_PROGRAMMED only after that, so MSI may be swapped for MSI-X once the
+ * status has reached it. Each firmware image latches its interrupt mode at
+ * its first notification; the Master Minion notifies only for host commands,
+ * so it latches MSI-X if the device was reset since the last MSI session.
+ * The firmware does not program the MSI-X doorbell, so MSI-X interrupts are
+ * not expected to arrive: the queues stay polled, the gain is that firmware
+ * notifications no longer fail. If the SP does not reach ATU_PROGRAMMED, or
+ * MSI-X cannot be allocated, the device keeps its single MSI vector.
+ *
+ * Return: 0 on success (MSI-X or MSI kept), negative error if no vector is left
+ */
+static int et_switch_to_msix(struct et_pci_dev *et_dev)
+{
+	struct pci_dev *pdev = et_dev->pdev;
+	const struct et_bar_mapping *bm = &DIR_MAPPINGS[IOMEM_R_DIR_MGMT];
+	unsigned long timeout = jiffies + msecs_to_jiffies(ET_MSIX_SWITCH_TIMEOUT_MS);
+	struct et_mgmt_dir_header __iomem *dir;
+	s16 status = MGMT_BOOT_STATUS_DEV_NOT_READY;
+	int rv;
+
+	dir = pci_iomap_range(pdev, bm->bar, bm->bar_offset, bm->size);
+	if (!dir) {
+		dev_warn(&pdev->dev, "MSI-X: DIR mapping failed, keeping 1 MSI vector\n");
+		return 0;
+	}
+
+	for (;;) {
+		status = (s16)ioread16(&dir->status);
+		if (status >= MGMT_BOOT_STATUS_ATU_PROGRAMMED ||
+		    time_after(jiffies, timeout))
+			break;
+		msleep(20);
+	}
+	pci_iounmap(pdev, dir);
+
+	if (status < MGMT_BOOT_STATUS_ATU_PROGRAMMED) {
+		dev_warn(&pdev->dev,
+			 "MSI-X: SP boot status %d below ATU_PROGRAMMED, keeping 1 MSI vector\n",
+			 status);
+		return 0;
+	}
+
+	pci_free_irq_vectors(pdev);
+	rv = pci_alloc_irq_vectors(pdev, ET_MAX_MSI_VECS, ET_MAX_MSI_VECS,
+				   PCI_IRQ_MSIX);
+	if (rv == ET_MAX_MSI_VECS) {
+		et_dev->num_irq_vecs = rv;
+		et_dev->irq_msix = true;
+		dev_info(&pdev->dev,
+			 "switched to %d MSI-X vectors after SP boot status %d; queues stay polled\n",
+			 rv, status);
+		return 0;
+	}
+
+	dev_warn(&pdev->dev, "MSI-X: alloc failed (%d), back to 1 MSI vector\n",
+		 rv);
+	rv = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSI);
+	if (rv != 1) {
+		dev_err(&pdev->dev, "msi vector re-alloc failed: %d\n", rv);
+		return rv < 0 ? rv : -ENOSPC;
+	}
+	et_dev->num_irq_vecs = 1;
+	return 0;
+}
+
+/**
  * init_et_pci_dev() - Initialize ETSoC1 PCI device
  * @et_dev: Pointer to struct et_pci_dev
  * @miscdev_create: Create miscellaneous character device node
@@ -2621,6 +2701,13 @@ static int init_et_pci_dev(struct et_pci_dev *et_dev, bool miscdev_create)
 		goto error_free_irq_vectors;
 	}
 
+	et_dev->irq_msix = false;
+	if (et_dev->num_irq_vecs == 1 && msix) {
+		rv = et_switch_to_msix(et_dev);
+		if (rv)
+			goto error_release_regions;
+	}
+
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)) && (!defined(RHEL_MAJOR) || (RHEL_MAJOR < 9))
 	rv = pci_enable_pcie_error_reporting(pdev);
 	if (rv) {
@@ -2659,6 +2746,7 @@ error_pci_disable_pcie_error_reporting:
 	}
 #endif
 
+error_release_regions:
 	pci_release_regions(pdev);
 
 error_free_irq_vectors:

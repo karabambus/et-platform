@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where the kernel cannot grant 4 multi-message MSI vectors, probe now accepts
   1 vector, shares it between all SQ/CQ handlers and polls the queues every
   jiffy. Hosts that grant 4 vectors behave as before.
+- MSI-X switch (module parameter `msix`, default on): with a single MSI
+  vector, once the SP boot status reaches ATU_PROGRAMMED (the SP has seen MSI
+  enabled), MSI is replaced by 4 MSI-X vectors. The firmware latches its
+  interrupt mode at its first notification, so Master Minion notifications no
+  longer fail and are no longer reported as -41 error events. The queues stay
+  polled. Takes effect only if the device was reset since the last
+  single-MSI session; a warning is logged otherwise.
 ### Changed
 ### Deprecated
 ### Removed

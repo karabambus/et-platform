@@ -261,17 +261,24 @@ static irqreturn_t et_pcie_cq_isr(int irq, void *cq_id)
  * it the host grants one vector, all SQ/CQ handlers share it, and the vectors
  * the device cannot raise are covered by polling. The SQ/CQ work handlers
  * tolerate spurious invocation, so the shared vector and the poll are safe.
+ * After a switch to MSI-X the queues stay polled as well: the firmware does
+ * not program the MSI-X doorbell, so those interrupts may never arrive.
  */
-static inline bool et_irq_is_polled(struct et_pci_dev *et_dev)
+static inline bool et_irq_is_shared(struct et_pci_dev *et_dev)
 {
 	return et_dev->num_irq_vecs < ET_MAX_MSI_VECS;
+}
+
+static inline bool et_irq_is_polled(struct et_pci_dev *et_dev)
+{
+	return et_irq_is_shared(et_dev) || et_dev->irq_msix;
 }
 
 static inline int et_irq_vector(struct et_pci_dev *et_dev,
 				unsigned long vec_idx)
 {
 	return pci_irq_vector(et_dev->pdev,
-			      et_irq_is_polled(et_dev) ? 0 : vec_idx);
+			      et_irq_is_shared(et_dev) ? 0 : vec_idx);
 }
 
 static inline void et_poll_timer_stop(struct timer_list *timer)
@@ -483,7 +490,7 @@ static ssize_t et_squeue_init_all(struct et_pci_dev *et_dev, bool is_mgmt)
 	}
 
 	rv = request_irq(et_irq_vector(et_dev, vec_idx), et_pcie_sq_isr,
-			 et_irq_is_polled(et_dev) ? IRQF_SHARED : 0,
+			 et_irq_is_shared(et_dev) ? IRQF_SHARED : 0,
 			 devm_kasprintf(&et_dev->pdev->dev, GFP_KERNEL,
 					"%s%d_irq%ld", is_mgmt ? "mgmt" : "ops",
 					et_dev->devnum, vec_idx),
@@ -596,7 +603,7 @@ static ssize_t et_cqueue_init_all(struct et_pci_dev *et_dev, bool is_mgmt)
 	}
 
 	rv = request_irq(et_irq_vector(et_dev, vec_idx), et_pcie_cq_isr,
-			 et_irq_is_polled(et_dev) ? IRQF_SHARED : 0,
+			 et_irq_is_shared(et_dev) ? IRQF_SHARED : 0,
 			 devm_kasprintf(&et_dev->pdev->dev, GFP_KERNEL,
 					"%s%d_irq%ld", is_mgmt ? "mgmt" : "ops",
 					et_dev->devnum, vec_idx),

@@ -45,6 +45,10 @@ enum et_msi_vec_idx {
  */
 #define ET_IRQ_POLL_PERIOD_JIFFIES 1
 
+/* How long to wait for the SP to pass its MSI handshake before MSI-X */
+#define ET_MSIX_SWITCH_TIMEOUT_MS 30000
+
+
 /**
  * struct et_bar_mapping - Compact information to map a BAR region
  * @bar: The BAR number
@@ -156,6 +160,7 @@ struct et_mgmt_dev {
  * @devnum: Physical device node index / device number
  * @is_initialized: ETSoC1 device as whole is initialized
  * @num_irq_vecs: MSI vectors granted; 1 means shared vector plus queue polling
+ * @irq_msix: the vectors are MSI-X (switched from 1 MSI); queues stay polled
  * @is_err_reporting: AER error reporting is enabled
  * @pdev: Pointer to struct pci_dev
  * @pstate: Pointer to struct pci_saved_state - holds PCIe config space state
@@ -172,6 +177,7 @@ struct et_pci_dev {
 	u8 devnum;
 	bool is_initialized;
 	u8 num_irq_vecs;
+	bool irq_msix;
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)) && (!defined(RHEL_MAJOR) || (RHEL_MAJOR < 9))
 	bool is_err_reporting;
 #endif

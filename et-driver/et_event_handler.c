@@ -14,6 +14,9 @@
 
 #define VALUE_STR_MAX_LEN 128
 
+/* MM_CQ_PUSH_ERROR in et-common-libs sp_mm_comms_spec.h: CQ notify failed */
+#define ET_MM_CQ_PUSH_ERROR (-41)
+
 /**
  * parse_pcie_syndrome() - Parses PCIe syndrome
  * @event_msg: Raw event information
@@ -672,6 +675,13 @@ int et_handle_device_event(struct et_cqueue *cq,
 		parse_cm_err_syndrome(event_msg, &dbg_msg);
 		atomic64_inc(
 			&stats->counters[ET_ERR_COUNTER_STATS_MINION_CE_COUNT]);
+		// A failed CQ notification after the switch to MSI-X means the
+		// Master Minion latched single-vector MSI before the switch.
+		if (et_dev->irq_msix &&
+		    (s32)event_msg->event_syndrome[1] == ET_MM_CQ_PUSH_ERROR)
+			dev_warn_once(
+				&pdev->dev,
+				"MSI-X: firmware still notifies with 1 MSI vector; reset the SoC or power-cycle for it to latch MSI-X\n");
 		break;
 	case DEV_MGMT_API_MID_MINION_RUNTIME_HANG_EVENT:
 		dbg_msg.desc = "Minion Runtime Hang";

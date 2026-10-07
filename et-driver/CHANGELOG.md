@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Deprecated
 ### Removed
 ### Fixed
+- Reset: once an ETSOC reset (or MM reset, ops queues only) command has been
+  accepted, ISRs, poll timers and SQ/CQ work handlers stop touching the
+  queues' device memory until the queues are re-initialized. With the queues
+  polled every jiffy, reads to a resetting device froze a host during
+  `DM_CMD_RESET_ETSOC`.
 ### Security
 
 ## [0.19.0] - 2024-09-25

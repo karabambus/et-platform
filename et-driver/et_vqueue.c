@@ -182,6 +182,9 @@ static irqreturn_t et_pcie_sq_isr(int irq, void *sq_id)
 	struct et_squeue *sqs = (struct et_squeue *)sq_id;
 	struct et_vq_common *vq_common = sqs[0].vq_common;
 
+	if (READ_ONCE(vq_common->quiesced))
+		return IRQ_HANDLED;
+
 	for (i = 0; i < vq_common->sq_count; i++)
 		queue_work(vq_common->sq_workqueue, &sqs[i].isr_work);
 
@@ -219,6 +222,9 @@ static void et_sq_isr_work(struct work_struct *work)
 {
 	struct et_squeue *sq = container_of(work, struct et_squeue, isr_work);
 
+	if (READ_ONCE(sq->vq_common->quiesced))
+		return;
+
 	// Check for SQ availability and wake up the waitqueue if available
 	if (test_bit(sq->index, sq->vq_common->sq_bitmap))
 		goto update_sq_bitmap;
@@ -249,6 +255,9 @@ static irqreturn_t et_pcie_cq_isr(int irq, void *cq_id)
 	int i;
 	struct et_cqueue *cqs = (struct et_cqueue *)cq_id;
 	struct et_vq_common *vq_common = cqs[0].vq_common;
+
+	if (READ_ONCE(vq_common->quiesced))
+		return IRQ_HANDLED;
 
 	for (i = 0; i < vq_common->cq_count; i++)
 		queue_work(vq_common->cq_workqueue, &cqs[i].isr_work);
@@ -288,6 +297,8 @@ static void et_sq_poll_timer_fn(struct timer_list *timer)
 	struct et_vq_data *vq_data =
 		container_of(timer, struct et_vq_data, sq_poll_timer);
 
+	if (READ_ONCE(vq_data->vq_common.quiesced))
+		return;
 	et_pcie_sq_isr(0, vq_data->sqs);
 	mod_timer(timer, jiffies + ET_IRQ_POLL_PERIOD_JIFFIES);
 }
@@ -297,6 +308,8 @@ static void et_cq_poll_timer_fn(struct timer_list *timer)
 	struct et_vq_data *vq_data =
 		container_of(timer, struct et_vq_data, cq_poll_timer);
 
+	if (READ_ONCE(vq_data->vq_common.quiesced))
+		return;
 	et_pcie_cq_isr(0, vq_data->cqs);
 	mod_timer(timer, jiffies + ET_IRQ_POLL_PERIOD_JIFFIES);
 }
@@ -329,6 +342,9 @@ static void et_cq_isr_work(struct work_struct *work)
 {
 	bool sync_for_host = true;
 	struct et_cqueue *cq = container_of(work, struct et_cqueue, isr_work);
+
+	if (READ_ONCE(cq->vq_common->quiesced))
+		return;
 
 	// Handle all pending messages in the cqueue
 	while (et_cqueue_pop(cq, sync_for_host) > 0) {
@@ -692,6 +708,7 @@ ssize_t et_vqueue_init_all(struct et_pci_dev *et_dev, bool is_mgmt)
 	mutex_init(&vq_common->cq_bitmap_mutex);
 	init_waitqueue_head(&vq_common->waitqueue);
 	vq_common->pdev = et_dev->pdev;
+	WRITE_ONCE(vq_common->quiesced, false);
 
 	rv = et_sysfs_add_group(et_dev, vq_stats_gid);
 	if (rv)
@@ -824,6 +841,28 @@ static void et_cqueue_destroy_all(struct et_pci_dev *et_dev, bool is_mgmt)
  * @et_dev: Pointer to struct et_pci_dev
  * @is_mgmt: indicates if mgmt or ops device
  */
+/**
+ * et_vqueue_quiesce() - Stop touching the queues' device memory
+ * @et_dev: Pointer to struct et_pci_dev
+ * @is_mgmt: mgmt or ops queues
+ *
+ * Called once a reset command has been accepted. While the device resets it
+ * stops answering reads; ISRs, poll timers and work handlers that keep
+ * reading the queues then stall CPUs on completion timeouts, and with the
+ * queues polled every jiffy that can freeze the host. Only a flag is set:
+ * callers may hold reset mutexes that the CQ work takes, so no work is
+ * flushed here. The poll timers stop re-arming at their next expiry; the
+ * reset path tears the queues down and re-initializes them.
+ */
+void et_vqueue_quiesce(struct et_pci_dev *et_dev, bool is_mgmt)
+{
+	struct et_vq_data *vq_data =
+		is_mgmt ? &et_dev->mgmt.vq_data : &et_dev->ops.vq_data;
+
+	WRITE_ONCE(vq_data->vq_common.quiesced, true);
+	smp_mb();
+}
+
 void et_vqueue_destroy_all(struct et_pci_dev *et_dev, bool is_mgmt)
 {
 	struct et_vq_data *vq_data;

@@ -58,6 +58,9 @@ struct et_msg_node {
  *	       EPOLL thread
  * @pdev: Pointer to struct pci_dev
  * @trace_region: Pointer to a BAR mapped region of SP traces
+ * @quiesced: a reset command was accepted; the device stops answering, so no
+ *	      ISR, poll or work handler may touch the queues' device memory until
+ *	      the queues are re-initialized
  */
 struct et_vq_common {
 	u16 sq_count;
@@ -87,6 +90,7 @@ struct et_vq_common {
 	wait_queue_head_t waitqueue;
 	struct pci_dev *pdev;
 	struct et_mapped_region *trace_region;
+	bool quiesced;
 };
 
 /**
@@ -181,5 +185,6 @@ bool et_cqueue_msg_available(struct et_cqueue *cq);
 
 ssize_t et_vqueue_init_all(struct et_pci_dev *et_dev, bool is_mgmt);
 void et_vqueue_destroy_all(struct et_pci_dev *et_dev, bool is_mgmt);
+void et_vqueue_quiesce(struct et_pci_dev *et_dev, bool is_mgmt);
 
 #endif

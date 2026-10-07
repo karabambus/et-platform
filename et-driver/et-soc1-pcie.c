@@ -895,6 +895,19 @@ static long esperanto_pcie_mgmt_ioctl(struct file *fp, unsigned int cmd,
 				(char __user __force *)cmd_info.cmd,
 				cmd_info.size);
 
+		// Once the device starts the reset it stops answering; stop
+		// touching the queues it serves before that (et_vqueue_quiesce()).
+		// The MM reset response still arrives on the mgmt CQ, so an MM
+		// reset quiesces only the ops queues.
+		if (rv == cmd_info.size) {
+			if ((cmd_info.flags & (CMD_DESC_FLAG_ETSOC_RESET |
+					       CMD_DESC_FLAG_MM_RESET)) &&
+			    et_dev->ops.is_initialized)
+				et_vqueue_quiesce(et_dev, false);
+			if (cmd_info.flags & CMD_DESC_FLAG_ETSOC_RESET)
+				et_vqueue_quiesce(et_dev, true);
+		}
+
 		if (cmd_info.flags &
 		    (CMD_DESC_FLAG_ETSOC_RESET | CMD_DESC_FLAG_MM_RESET)) {
 			if (rv != cmd_info.size)

@@ -12,6 +12,7 @@
 #include <linux/atomic.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
+#include <linux/timer.h>
 #include <linux/types.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
@@ -152,12 +153,16 @@ struct et_cqueue {
  * @sqs: Array of SQs
  * @hp_sqs: Array of HPSQs
  * @cqs: Array of CQs
+ * @sq_poll_timer: Re-runs the SQ ISR when the SQ vector is not delivered
+ * @cq_poll_timer: Re-runs the CQ ISR when the CQ vector is not delivered
  */
 struct et_vq_data {
 	struct et_vq_common vq_common;
 	struct et_squeue *sqs;
 	struct et_squeue *hp_sqs;
 	struct et_cqueue *cqs;
+	struct timer_list sq_poll_timer;
+	struct timer_list cq_poll_timer;
 };
 
 ssize_t et_squeue_copy_from_user(struct et_pci_dev *et_dev, bool is_mgmt,

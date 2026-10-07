@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- Single-MSI fallback: on hosts without interrupt remapping (no VT-d / AMD-Vi),
+  where the kernel cannot grant 4 multi-message MSI vectors, probe now accepts
+  1 vector, shares it between all SQ/CQ handlers and polls the queues every
+  jiffy. Hosts that grant 4 vectors behave as before.
 ### Changed
 ### Deprecated
 ### Removed

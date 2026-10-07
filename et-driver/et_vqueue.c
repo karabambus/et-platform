@@ -256,6 +256,51 @@ static irqreturn_t et_pcie_cq_isr(int irq, void *cq_id)
 	return IRQ_HANDLED;
 }
 
+/*
+ * Multi-message MSI on x86 needs interrupt remapping (VT-d / AMD-Vi). Without
+ * it the host grants one vector, all SQ/CQ handlers share it, and the vectors
+ * the device cannot raise are covered by polling. The SQ/CQ work handlers
+ * tolerate spurious invocation, so the shared vector and the poll are safe.
+ */
+static inline bool et_irq_is_polled(struct et_pci_dev *et_dev)
+{
+	return et_dev->num_irq_vecs < ET_MAX_MSI_VECS;
+}
+
+static inline int et_irq_vector(struct et_pci_dev *et_dev,
+				unsigned long vec_idx)
+{
+	return pci_irq_vector(et_dev->pdev,
+			      et_irq_is_polled(et_dev) ? 0 : vec_idx);
+}
+
+static inline void et_poll_timer_stop(struct timer_list *timer)
+{
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 0))
+	del_timer_sync(timer);
+#else
+	timer_delete_sync(timer);
+#endif
+}
+
+static void et_sq_poll_timer_fn(struct timer_list *timer)
+{
+	struct et_vq_data *vq_data =
+		container_of(timer, struct et_vq_data, sq_poll_timer);
+
+	et_pcie_sq_isr(0, vq_data->sqs);
+	mod_timer(timer, jiffies + ET_IRQ_POLL_PERIOD_JIFFIES);
+}
+
+static void et_cq_poll_timer_fn(struct timer_list *timer)
+{
+	struct et_vq_data *vq_data =
+		container_of(timer, struct et_vq_data, cq_poll_timer);
+
+	et_pcie_cq_isr(0, vq_data->cqs);
+	mod_timer(timer, jiffies + ET_IRQ_POLL_PERIOD_JIFFIES);
+}
+
 /**
  * et_cq_isr_work() - CQ work ISR to receive responses from CQ
  * @work: Pointer to struct work_struct specific to a CQ
@@ -437,8 +482,8 @@ static ssize_t et_squeue_init_all(struct et_pci_dev *et_dev, bool is_mgmt)
 		flush_workqueue(vq_data->vq_common.sq_workqueue);
 	}
 
-	rv = request_irq(pci_irq_vector(et_dev->pdev, vec_idx), et_pcie_sq_isr,
-			 0,
+	rv = request_irq(et_irq_vector(et_dev, vec_idx), et_pcie_sq_isr,
+			 et_irq_is_polled(et_dev) ? IRQF_SHARED : 0,
 			 devm_kasprintf(&et_dev->pdev->dev, GFP_KERNEL,
 					"%s%d_irq%ld", is_mgmt ? "mgmt" : "ops",
 					et_dev->devnum, vec_idx),
@@ -446,6 +491,12 @@ static ssize_t et_squeue_init_all(struct et_pci_dev *et_dev, bool is_mgmt)
 	if (rv) {
 		dev_err(&et_dev->pdev->dev, "request irq failed\n");
 		goto error_free_sqs;
+	}
+
+	if (et_irq_is_polled(et_dev)) {
+		timer_setup(&vq_data->sq_poll_timer, et_sq_poll_timer_fn, 0);
+		mod_timer(&vq_data->sq_poll_timer,
+			  jiffies + ET_IRQ_POLL_PERIOD_JIFFIES);
 	}
 
 	return rv;
@@ -544,8 +595,8 @@ static ssize_t et_cqueue_init_all(struct et_pci_dev *et_dev, bool is_mgmt)
 		flush_workqueue(vq_data->vq_common.cq_workqueue);
 	}
 
-	rv = request_irq(pci_irq_vector(et_dev->pdev, vec_idx), et_pcie_cq_isr,
-			 0,
+	rv = request_irq(et_irq_vector(et_dev, vec_idx), et_pcie_cq_isr,
+			 et_irq_is_polled(et_dev) ? IRQF_SHARED : 0,
 			 devm_kasprintf(&et_dev->pdev->dev, GFP_KERNEL,
 					"%s%d_irq%ld", is_mgmt ? "mgmt" : "ops",
 					et_dev->devnum, vec_idx),
@@ -553,6 +604,12 @@ static ssize_t et_cqueue_init_all(struct et_pci_dev *et_dev, bool is_mgmt)
 	if (rv) {
 		dev_err(&et_dev->pdev->dev, "request irq failed\n");
 		goto error_free_cqs;
+	}
+
+	if (et_irq_is_polled(et_dev)) {
+		timer_setup(&vq_data->cq_poll_timer, et_cq_poll_timer_fn, 0);
+		mod_timer(&vq_data->cq_poll_timer,
+			  jiffies + ET_IRQ_POLL_PERIOD_JIFFIES);
 	}
 
 	return 0;
@@ -709,7 +766,10 @@ static void et_squeue_destroy_all(struct et_pci_dev *et_dev, bool is_mgmt)
 		vq_data = &et_dev->ops.vq_data;
 	}
 
-	free_irq(pci_irq_vector(et_dev->pdev, vec_idx), (void *)vq_data->sqs);
+	if (et_irq_is_polled(et_dev))
+		et_poll_timer_stop(&vq_data->sq_poll_timer);
+
+	free_irq(et_irq_vector(et_dev, vec_idx), (void *)vq_data->sqs);
 
 	for (i = 0; i < vq_data->vq_common.sq_count; i++) {
 		cancel_work_sync(&vq_data->sqs[i].isr_work);
@@ -741,7 +801,10 @@ static void et_cqueue_destroy_all(struct et_pci_dev *et_dev, bool is_mgmt)
 		vq_data = &et_dev->ops.vq_data;
 	}
 
-	free_irq(pci_irq_vector(et_dev->pdev, vec_idx), (void *)vq_data->cqs);
+	if (et_irq_is_polled(et_dev))
+		et_poll_timer_stop(&vq_data->cq_poll_timer);
+
+	free_irq(et_irq_vector(et_dev, vec_idx), (void *)vq_data->cqs);
 
 	for (i = 0; i < vq_data->vq_common.cq_count; i++) {
 		cancel_work_sync(&vq_data->cqs[i].isr_work);

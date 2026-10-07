@@ -2597,13 +2597,23 @@ static int init_et_pci_dev(struct et_pci_dev *et_dev, bool miscdev_create)
 	// Device Operations:
 	//  - Vector[2] - Ops SQ(s)
 	//  - Vector[3] - Ops CQ(s)
+	// Hosts without interrupt remapping cannot grant multi-message MSI; fall
+	// back to one shared vector and poll the queues (see et_vqueue.c).
+	// Exactly 1 or 4 vectors: with 2 enabled the device would raise a vector
+	// that has no handler.
 	rv = pci_alloc_irq_vectors(pdev, ET_MAX_MSI_VECS, ET_MAX_MSI_VECS,
 				   PCI_IRQ_MSI);
-	if (rv != ET_MAX_MSI_VECS) {
-		dev_err(&pdev->dev, "msi vectors=%d alloc failed\n",
-			ET_MAX_MSI_VECS);
+	if (rv != ET_MAX_MSI_VECS)
+		rv = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSI);
+	if (rv != ET_MAX_MSI_VECS && rv != 1) {
+		dev_err(&pdev->dev, "msi vectors alloc failed: %d\n", rv);
 		goto error_clear_master;
 	}
+	et_dev->num_irq_vecs = rv;
+	if (rv == 1)
+		dev_warn(&pdev->dev,
+			 "1 MSI vector granted (no interrupt remapping?); polling queues every %d jiffies\n",
+			 ET_IRQ_POLL_PERIOD_JIFFIES);
 
 	rv = pci_request_regions(pdev, DRIVER_NAME);
 	if (rv) {

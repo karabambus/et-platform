@@ -284,12 +284,20 @@ static void et_cq_isr_work(struct work_struct *work)
 {
 	bool sync_for_host = true;
 	struct et_cqueue *cq = container_of(work, struct et_cqueue, isr_work);
+	unsigned int budget = ET_CQ_POP_BUDGET;
 
-	// Handle all pending messages in the cqueue
+	// Handle pending messages in the cqueue. A device that keeps the CQ
+	// non-empty (event storm, corrupt circbuffer after a reset) must not pin
+	// this worker: cancel_work_sync() in the reset path waits for it. Past the
+	// budget the work re-queues itself, which cancel_work_sync() can stop.
 	while (et_cqueue_pop(cq, sync_for_host) > 0) {
 		// Only sync `circbuffer` the first time
 		if (sync_for_host)
 			sync_for_host = false;
+		if (--budget == 0) {
+			queue_work(cq->vq_common->cq_workqueue, &cq->isr_work);
+			break;
+		}
 	}
 }
 

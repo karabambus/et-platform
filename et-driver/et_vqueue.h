@@ -21,6 +21,9 @@
 #include "et_device_api.h"
 #include "et_sysfs.h"
 
+/* CQ messages handled per CQ work invocation before it re-queues itself */
+#define ET_CQ_POP_BUDGET 256
+
 /* Maximum allowed number of VQs */
 #define ET_MAX_QUEUES 64
 

@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Deprecated
 ### Removed
 ### Fixed
+- The CQ work handler pops at most 256 messages per run and then re-queues
+  itself. Before, a CQ that stayed non-empty (an event storm, or a corrupt
+  circbuffer read from a device that is resetting) kept the worker busy
+  forever, and an SoC reset then blocked in `cancel_work_sync()` behind it.
 ### Security
 
 ## [0.19.0] - 2024-09-25
